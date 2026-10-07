@@ -1,0 +1,516 @@
+# ============================================================
+# Supplementary Code
+# Single-cell RNA-seq integration, unsupervised clustering,
+# macrophage subclustering, and GNAS expression analysis
+# ============================================================
+
+import os
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import scanpy.external as sce
+import scipy.sparse as sp
+import matplotlib.pyplot as plt
+from scipy.io import mmwrite
+
+
+# ============================================================
+# 1. Load AnnData object
+# ============================================================
+
+adata = sc.read_h5ad("plaque_atlas.h5ad")
+
+print(adata)
+print(adata.obs.columns.tolist())
+print(adata.layers.keys())
+print(adata.obsm.keys())
+
+
+# ============================================================
+# 2. Convert Ensembl IDs to gene symbols
+#
+# The original Ensembl IDs are retained in the "ensembl_id"
+# column to preserve gene identifiers.
+# ============================================================
+
+adata.var["ensembl_id"] = adata.var_names.astype(str)
+
+if "feature_name" in adata.var.columns:
+    adata.var_names = adata.var["feature_name"].astype(str)
+
+adata.var_names_make_unique()
+
+print("GNAS" in adata.var_names)
+
+
+# ============================================================
+# 3. Preserve raw counts
+#
+# Skip this step if adata.raw already contains raw UMI counts.
+# ============================================================
+
+if adata.raw is None:
+    adata.raw = adata.copy()
+
+
+# ============================================================
+# 4. Standard preprocessing
+#
+# Skip this section when using an already processed integrated
+# atlas with an existing latent representation.
+# ============================================================
+
+adata_work = adata.copy()
+
+sc.pp.normalize_total(
+    adata_work,
+    target_sum=1e4
+)
+
+sc.pp.log1p(
+    adata_work
+)
+
+sc.pp.highly_variable_genes(
+    adata_work,
+    n_top_genes=3000,
+    flavor="seurat",
+    batch_key="dataset"
+)
+
+adata_work.raw = adata_work
+
+sc.pp.scale(
+    adata_work,
+    max_value=10
+)
+
+sc.tl.pca(
+    adata_work,
+    n_comps=50,
+    use_highly_variable=True,
+    svd_solver="arpack"
+)
+
+
+# ============================================================
+# 5. Harmony integration
+#
+# "dataset" is used as the technical batch variable.
+# Biological variables such as disease state should not be
+# included as Harmony covariates.
+# ============================================================
+
+sce.pp.harmony_integrate(
+    adata_work,
+    key="dataset",
+    basis="X_pca",
+    adjusted_basis="X_pca_harmony"
+)
+
+
+# ============================================================
+# 6. Nearest-neighbor graph and unsupervised clustering
+# ============================================================
+
+sc.pp.neighbors(
+    adata_work,
+    use_rep="X_pca_harmony",
+    n_neighbors=15,
+    n_pcs=30
+)
+
+sc.tl.umap(
+    adata_work,
+    min_dist=0.3,
+    random_state=123
+)
+
+sc.tl.leiden(
+    adata_work,
+    resolution=0.6,
+    key_added="leiden_harmony",
+    random_state=123
+)
+
+
+# ============================================================
+# 7. Visualize unsupervised clusters
+# ============================================================
+
+sc.pl.umap(
+    adata_work,
+    color="leiden_harmony",
+    legend_loc="on data",
+    frameon=False
+)
+
+
+# ============================================================
+# 8. Identify cluster marker genes
+# ============================================================
+
+sc.tl.rank_genes_groups(
+    adata_work,
+    groupby="leiden_harmony",
+    method="wilcoxon",
+    reference="rest",
+    use_raw=False,
+    key_added="cluster_markers"
+)
+
+cluster_markers = []
+
+for cluster in adata_work.obs["leiden_harmony"].cat.categories:
+
+    tmp = sc.get.rank_genes_groups_df(
+        adata_work,
+        group=cluster,
+        key="cluster_markers"
+    )
+
+    tmp["cluster"] = cluster
+    cluster_markers.append(tmp)
+
+cluster_markers = pd.concat(
+    cluster_markers,
+    ignore_index=True
+)
+
+cluster_markers.to_csv(
+    "unsupervised_cluster_markers.csv",
+    index=False
+)
+
+
+# ============================================================
+# 9. Major lineage marker genes
+# ============================================================
+
+lineage_markers = {
+    "Macrophage_Monocyte": [
+        "LYZ", "CTSS", "FCER1G", "TYROBP",
+        "CTSB", "LST1", "AIF1"
+    ],
+    "T_cell": [
+        "CD3D", "CD3E", "TRAC"
+    ],
+    "B_cell": [
+        "CD79A", "MS4A1", "CD37"
+    ],
+    "Endothelial": [
+        "PECAM1", "VWF", "KDR", "EMCN"
+    ],
+    "Smooth_muscle": [
+        "ACTA2", "TAGLN", "MYH11", "CNN1"
+    ],
+    "Fibroblast": [
+        "COL1A1", "COL1A2", "DCN", "COL3A1"
+    ]
+}
+
+sc.pl.dotplot(
+    adata_work,
+    lineage_markers,
+    groupby="leiden_harmony",
+    standard_scale="var"
+)
+
+
+# ============================================================
+# 10. Extract macrophage/monocyte compartment
+#
+# If validated author annotations are available, they may be
+# used directly instead of reconstructing the annotation.
+# ============================================================
+
+myeloid_labels = [
+    "HMOX1+ Macrophage",
+    "Inflammatory Macrophage",
+    "Monocyte",
+    "Other Macrophage",
+    "PLIN2+/TREM1+ Macrophage",
+    "TREM2+/Foamy Macrophage"
+]
+
+mac = adata[
+    adata.obs["cell_type_level2"].isin(myeloid_labels)
+].copy()
+
+mac.var_names_make_unique()
+
+print(mac)
+print(mac.obs["cell_type_level2"].value_counts())
+
+
+# ============================================================
+# 11. Macrophage subtype marker visualization
+# ============================================================
+
+macrophage_markers = [
+    "TREM2",
+    "GPNMB",
+    "APOC1",
+    "APOE",
+    "LPL",
+    "CD9",
+    "SPP1",
+    "FABP5",
+    "LGALS3",
+    "PLIN2",
+    "TREM1",
+    "HMOX1",
+    "CD36",
+    "MSR1"
+]
+
+macrophage_markers = [
+    g for g in macrophage_markers
+    if g in mac.var_names
+]
+
+sc.pl.dotplot(
+    mac,
+    macrophage_markers,
+    groupby="cell_type_level2",
+    use_raw=False,
+    layer="log_normalized_individually",
+    standard_scale="var"
+)
+
+
+# ============================================================
+# 12. Define the TREM2+/Foamy macrophage population
+# ============================================================
+
+foam = mac[
+    mac.obs["cell_type_level2"]
+    == "TREM2+/Foamy Macrophage"
+].copy()
+
+print(foam)
+
+
+# ============================================================
+# 13. Visualize GNAS expression across macrophage subtypes
+# ============================================================
+
+sc.pl.umap(
+    mac,
+    color="GNAS",
+    use_raw=False,
+    layer="log_normalized_individually",
+    frameon=False,
+    vmin="p5",
+    vmax="p99"
+)
+
+sc.pl.violin(
+    mac,
+    keys="GNAS",
+    groupby="cell_type_level2",
+    use_raw=False,
+    layer="log_normalized_individually",
+    rotation=45,
+    stripplot=False
+)
+
+
+# ============================================================
+# 14. Compare GNAS expression within the TREM2+/Foamy
+# macrophage population
+#
+# Cells in the upper and lower quartiles of GNAS expression
+# are used to define GNAS-high and GNAS-low populations.
+# ============================================================
+
+foam_expression = foam.copy()
+
+foam_expression.X = foam_expression.layers[
+    "log_normalized_individually"
+].copy()
+
+gnas_expr = foam_expression[:, "GNAS"].X
+
+if sp.issparse(gnas_expr):
+    gnas_expr = gnas_expr.toarray().flatten()
+else:
+    gnas_expr = np.asarray(gnas_expr).flatten()
+
+q25 = np.quantile(
+    gnas_expr,
+    0.25
+)
+
+q75 = np.quantile(
+    gnas_expr,
+    0.75
+)
+
+foam_expression.obs["GNAS_group"] = "Intermediate"
+
+foam_expression.obs.loc[
+    gnas_expr <= q25,
+    "GNAS_group"
+] = "GNAS_low"
+
+foam_expression.obs.loc[
+    gnas_expr >= q75,
+    "GNAS_group"
+] = "GNAS_high"
+
+
+# ============================================================
+# 15. Retain upper and lower quartiles for differential
+# expression analysis
+# ============================================================
+
+foam_GNAS = foam_expression[
+    foam_expression.obs["GNAS_group"].isin(
+        ["GNAS_high", "GNAS_low"]
+    )
+].copy()
+
+
+# ============================================================
+# 16. Differential expression between GNAS-high and GNAS-low
+# TREM2+/Foamy macrophages
+# ============================================================
+
+sc.tl.rank_genes_groups(
+    foam_GNAS,
+    groupby="GNAS_group",
+    groups=["GNAS_high"],
+    reference="GNAS_low",
+    method="wilcoxon",
+    use_raw=False,
+    key_added="GNAS_high_vs_low"
+)
+
+GNAS_DEG = sc.get.rank_genes_groups_df(
+    foam_GNAS,
+    group="GNAS_high",
+    key="GNAS_high_vs_low"
+)
+
+GNAS_DEG.to_csv(
+    "GNAS_high_vs_low_TREM2_Foamy_DEG.csv",
+    index=False
+)
+
+
+# ============================================================
+# 17. Examine genes involved in lipid handling and
+# foam-cell biology
+# ============================================================
+
+priority_genes = [
+    "SPP1",
+    "LPL",
+    "CD9",
+    "APOE",
+    "TREM2",
+    "LGALS3",
+    "GPNMB",
+    "CTSD",
+    "MSR1",
+    "LIPA",
+    "CTSB",
+    "APOC1",
+    "FABP5",
+    "CD36"
+]
+
+priority_results = GNAS_DEG[
+    GNAS_DEG["names"].isin(priority_genes)
+].copy()
+
+priority_results.to_csv(
+    "GNAS_high_priority_foam_genes.csv",
+    index=False
+)
+
+print(priority_results)
+
+
+# ============================================================
+# 18. Export raw counts from TREM2+/Foamy macrophages
+# for scTenifoldKnk
+#
+# AnnData stores cells x genes, whereas scTenifoldKnk
+# requires genes x cells.
+# ============================================================
+
+if foam.raw is None:
+    raise ValueError(
+        "Raw count matrix is required for scTenifoldKnk."
+    )
+
+raw_counts = foam.raw.X.T
+
+if not sp.issparse(raw_counts):
+    raw_counts = sp.csr_matrix(raw_counts)
+
+raw_counts = raw_counts.tocsr()
+
+mmwrite(
+    "TREM2_Foamy_raw_counts.mtx",
+    raw_counts
+)
+
+
+# ============================================================
+# 19. Export gene annotation
+# ============================================================
+
+gene_table = pd.DataFrame({
+    "gene_symbol":
+        foam.raw.var["feature_name"].astype(str).values,
+    "ensembl_id":
+        foam.raw.var_names.astype(str)
+})
+
+gene_table.to_csv(
+    "genes.csv",
+    index=False
+)
+
+
+# ============================================================
+# 20. Export cell identifiers
+# ============================================================
+
+cell_table = pd.DataFrame({
+    "cell_id":
+        foam.obs_names.astype(str)
+})
+
+cell_table.to_csv(
+    "cells.csv",
+    index=False
+)
+
+
+# ============================================================
+# 21. Export metadata
+# ============================================================
+
+foam.obs.to_csv(
+    "TREM2_Foamy_metadata.csv"
+)
+
+
+# ============================================================
+# 22. Save processed AnnData object
+# ============================================================
+
+foam_GNAS.write_h5ad(
+    "TREM2_Foamy_GNAS_analysis.h5ad"
+)
+
+
+# ============================================================
+# 23. Record software versions
+# ============================================================
+
+sc.logging.print_versions()
