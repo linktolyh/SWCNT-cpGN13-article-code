@@ -1,0 +1,114 @@
+# ============================================================
+# AfCycDesign structure prediction of the final cyclic peptide
+# Sequence: YCFQSVYAIWGTLC
+# ============================================================
+
+import os
+import numpy as np
+
+from colabdesign.af import mk_af_model
+from colabdesign.shared.utils import clear_mem
+
+
+# ============================================================
+# 1. Define the cyclic peptide sequence
+# ============================================================
+
+sequence = "YCFQSVYAIWGTLC"
+peptide_length = len(sequence)
+
+print("Sequence:", sequence)
+print("Peptide length:", peptide_length)
+
+
+# ============================================================
+# 2. Initialize AlphaFold/ColabDesign prediction model
+# ============================================================
+
+clear_mem()
+
+model = mk_af_model(
+    protocol="fixbb",
+    use_templates=False,
+    use_multimer=False
+)
+
+
+# ============================================================
+# 3. Prepare the peptide input
+#
+# The peptide is modeled as a single chain.
+# ============================================================
+
+model.prep_inputs(
+    length=peptide_length
+)
+
+
+# ============================================================
+# 4. Set the fixed amino-acid sequence
+# ============================================================
+
+model.set_seq(
+    seq=sequence
+)
+
+
+# ============================================================
+# 5. Apply cyclic relative positional encoding
+#
+# The cyclic offset treats residues 1 and N as adjacent,
+# thereby representing head-to-tail cyclization.
+# ============================================================
+
+idx = np.arange(peptide_length)
+
+offset = idx[:, None] - idx[None, :]
+
+offset_forward = np.mod(
+    offset,
+    peptide_length
+)
+
+offset_backward = np.mod(
+    -offset,
+    peptide_length
+)
+
+cyclic_offset = np.where(
+    offset_forward <= offset_backward,
+    offset_forward,
+    -offset_backward
+)
+
+model._inputs["offset"] = cyclic_offset.astype(np.int32)
+
+
+# ============================================================
+# 6. Predict the cyclic peptide structure
+#
+# Multiple AlphaFold models and recycles can be evaluated.
+# Six recycles were used for the final prediction.
+# ============================================================
+
+model.predict(
+    models=[0, 1, 2, 3, 4],
+    num_recycles=6,
+    verbose=True
+)
+
+
+# ============================================================
+# 7. Save the predicted structure
+# ============================================================
+
+model.save_pdb(
+    "YCFQSVYAIWGTLC_AfCycDesign.pdb"
+)
+
+
+# ============================================================
+# 8. Report confidence metrics
+# ============================================================
+
+print(model.aux["log"])
