@@ -1,0 +1,238 @@
+# ============================================================
+# Supplementary Code
+# In silico knockout of GNAS in human TREM2+/Foamy macrophages
+# using scTenifoldKnk
+# ============================================================
+
+library(Matrix)
+library(scTenifoldKnk)
+
+
+# ============================================================
+# 1. Load raw count matrix
+# ============================================================
+
+counts <- readMM(
+  "TREM2_Foamy_raw_counts.mtx"
+)
+
+genes <- read.csv(
+  "genes.csv",
+  stringsAsFactors = FALSE
+)
+
+cells <- read.csv(
+  "cells.csv",
+  stringsAsFactors = FALSE
+)
+
+
+# ============================================================
+# 2. Assign gene and cell identifiers
+# ============================================================
+
+rownames(counts) <- make.unique(
+  genes$gene_symbol
+)
+
+colnames(counts) <- cells$cell_id
+
+
+# ============================================================
+# 3. Convert to compressed sparse column format
+# ============================================================
+
+counts <- as(
+  counts,
+  "CsparseMatrix"
+)
+
+
+# ============================================================
+# 4. Confirm dimensions and presence of GNAS
+# ============================================================
+
+print(
+  dim(counts)
+)
+
+print(
+  "GNAS" %in% rownames(counts)
+)
+
+
+# ============================================================
+# 5. Calculate the detection rate of GNAS
+# ============================================================
+
+GNAS_detection_rate <- mean(
+  counts["GNAS", ] > 0
+)
+
+print(
+  GNAS_detection_rate
+)
+
+
+# ============================================================
+# 6. Run low-computation scTenifoldKnk analysis
+#
+# Three networks with 250 cells per network were used to
+# reduce computational demand while preserving the overall
+# network-perturbation workflow.
+# ============================================================
+
+set.seed(123)
+
+GNAS_KO <- scTenifoldKnk(
+  countMatrix = counts,
+  gKO = "GNAS",
+  nc_nNet = 3,
+  nc_nCells = 250,
+  td_K = 3,
+  nCores = 4
+)
+
+
+# ============================================================
+# 7. Save the complete virtual-knockout result
+# ============================================================
+
+saveRDS(
+  GNAS_KO,
+  "GNAS_scTenifoldKnk_result.rds"
+)
+
+
+# ============================================================
+# 8. Inspect the output structure
+# ============================================================
+
+print(
+  names(GNAS_KO)
+)
+
+str(
+  GNAS_KO,
+  max.level = 2
+)
+
+
+# ============================================================
+# 9. Extract differential regulatory effects
+# ============================================================
+
+if (
+  "diffRegulation" %in%
+  names(GNAS_KO)
+) {
+
+  diff_reg <- GNAS_KO$diffRegulation
+
+  write.csv(
+    diff_reg,
+    "GNAS_virtual_KO_differential_regulation.csv",
+    row.names = TRUE
+  )
+
+  print(
+    head(
+      diff_reg,
+      20
+    )
+  )
+}
+
+
+# ============================================================
+# 10. Examine foam-cell and lipid-handling genes
+# ============================================================
+
+target_genes <- c(
+  "CD36",
+  "MSR1",
+  "TREM2",
+  "GPNMB",
+  "APOC1",
+  "APOE",
+  "LPL",
+  "PLIN2",
+  "FABP5",
+  "CD9",
+  "SPP1",
+  "LGALS3",
+  "LIPA",
+  "CTSB",
+  "CTSD"
+)
+
+if (
+  "diffRegulation" %in%
+  names(GNAS_KO)
+) {
+
+  diff_reg <- GNAS_KO$diffRegulation
+
+  if (
+    all(
+      target_genes %in%
+      rownames(diff_reg)
+    )
+  ) {
+
+    target_result <- diff_reg[
+      target_genes,
+      ,
+      drop = FALSE
+    ]
+
+  } else {
+
+    target_result <- diff_reg[
+      intersect(
+        target_genes,
+        rownames(diff_reg)
+      ),
+      ,
+      drop = FALSE
+    ]
+  }
+
+  write.csv(
+    target_result,
+    "GNAS_virtual_KO_foam_cell_targets.csv",
+    row.names = TRUE
+  )
+
+  print(
+    target_result
+  )
+}
+
+
+# ============================================================
+# 11. Plot the GNAS-centered virtual-knockout network
+# ============================================================
+
+if (
+  exists(
+    "plotKO",
+    where = asNamespace(
+      "scTenifoldKnk"
+    ),
+    inherits = FALSE
+  )
+) {
+
+  plotKO(
+    GNAS_KO,
+    gKO = "GNAS"
+  )
+}
+
+
+# ============================================================
+# 12. Record R session information
+# ============================================================
+
+sessionInfo()
